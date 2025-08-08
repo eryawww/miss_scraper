@@ -1,0 +1,7 @@
+zendriver
+fastmcp
+agno
+google-genai
+mcp
+fastapi
+sqlalchemy

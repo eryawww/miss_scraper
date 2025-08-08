@@ -1,0 +1,6 @@
+.history/
+.env
+.vscode/
+__pycache__/
+tmp/
+ref/
