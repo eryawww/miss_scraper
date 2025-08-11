@@ -7,8 +7,14 @@ import logging
 import pathlib
 from typing import Any, Dict, List, Tuple, cast
 from miss_scraper.mcp.tools.browser.dom import InteractiveDomMap, DOMElementNode, DOMTextNode, construct_dom_tree
+from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+import os
 
 logger = logging.getLogger(__name__)
+
+def _read_static_file(file_name: str) -> str:
+    with open(os.path.join(os.path.dirname(__file__), "static", file_name), "r") as f:
+        return f.read()
 
 async def _dump_page(tab: zd.Tab, file_path: pathlib.Path) -> str:
     """Dump the page to a file."""
@@ -19,8 +25,109 @@ async def _dump_page(tab: zd.Tab, file_path: pathlib.Path) -> str:
         f.write(content)
     return content
 
-def _normalize_whitespace(text: str) -> str:
-    return " ".join(text.split()).strip()
+async def inject_extracted_content(tab: zd.Tab, extracted_content: dict[int, Any]) -> None:
+    """
+    Inject the extracted content into the page.
+    Mutates the tab object.
+    """
+    if not hasattr(tab, "extracted_content"):
+        tab.extracted_content = {}
+    tab.extracted_content.update(extracted_content)    
+
+async def get_page_source_markdown(tab: zd.Tab) -> str:
+    content = await tab.get_content()
+    raw_html_url = f"raw:{content}"
+    config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
+
+    async with AsyncWebCrawler() as crawler:
+        result = await crawler.arun(url=raw_html_url, config=config)
+        if result.success:
+            return str(result.markdown)
+        else:
+            return f"Failed to crawl raw HTML: {result.error_message}"
+
+async def get_page_metadata(tab) -> dict:
+    """
+    Extract complete page context including metadata, URL, title, and other relevant information.
+    """
+    context = {}
+    
+    try:
+        # Get basic page information
+        context["url"] = await tab.get_url()
+        context["title"] = await tab.get_title()
+        
+        # Get viewport information
+        viewport = await tab.get_viewport()
+        context["viewport"] = {
+            "width": viewport.get("width", 0),
+            "height": viewport.get("height", 0)
+        }
+        
+        # Extract meta tags and other metadata via JavaScript
+        js_code = _read_static_file("get_metadata.js")
+        meta_info = await tab.evaluate(js_code)
+        
+        context.update(meta_info)
+        
+    except Exception as e:
+        logger.warning(f"Error extracting enhanced page context: {e}")
+        context = {
+            "url": "unknown",
+            "title": "unknown", 
+            "error": str(e)
+        }
+    
+    return context
+
+def format_content_and_metadata(markdown_content: str, page_metadata: dict) -> str:
+    """
+    Format the complete content combining markdown with contextual information (metadata, links, images, etc.).
+    """
+    enhanced_parts = []
+    
+    # Add page metadata section
+    enhanced_parts.append("# Page Metadata")
+    enhanced_parts.append(f"**URL:** {page_metadata.get('url', 'unknown')}")
+    enhanced_parts.append(f"**Title:** {page_metadata.get('title', 'unknown')}")
+    
+    if page_metadata.get('description'):
+        enhanced_parts.append(f"**Description:** {page_metadata['description']}")
+    
+    if page_metadata.get('keywords'):
+        enhanced_parts.append(f"**Keywords:** {page_metadata['keywords']}")
+    
+    if page_metadata.get('language'):
+        enhanced_parts.append(f"**Language:** {page_metadata['language']}")
+    
+    # Add heading structure
+    headings = page_metadata.get('headings', [])
+    if headings:
+        enhanced_parts.append("\n## Page Structure (Headings)")
+        for heading in headings[:10]:  # Limit to first 10 headings
+            enhanced_parts.append(f"- {heading['level'].upper()}: {heading['text']}")
+    
+    # Add important links context
+    links = page_metadata.get('links', [])
+    if links:
+        enhanced_parts.append("\n## Important Links")
+        for link in links[:10]:  # Limit to first 10 links
+            if link['text']:
+                enhanced_parts.append(f"- [{link['text']}]({link['href']})")
+    
+    # Add image information
+    images = page_metadata.get('images', [])
+    if images:
+        enhanced_parts.append("\n## Images and Media")
+        for img in images[:5]:  # Limit to first 5 images
+            alt_text = img['alt'] or img['title'] or 'No description'
+            enhanced_parts.append(f"- Image: {alt_text} (src: {img['src']})")
+    
+    # Add the main content
+    enhanced_parts.append("\n# Main Content")
+    enhanced_parts.append(markdown_content)
+    
+    return "\n".join(enhanced_parts)
 
 async def get_interactive_dom_map(tab: zd.Tab) -> InteractiveDomMap:
     if not hasattr(tab, "dom_tree_state"):
@@ -32,7 +139,7 @@ async def inject_interactivity(tab: zd.Tab) -> InteractiveDomMap:
     Inject detected interactive elements into the DOM tree.
     This is a side effect that mutates the tab object.
     """
-    eval_page = await exec_js_interactivity(tab)
+    eval_page = await _exec_js_interactivity(tab)
     root_node, interactive_dom_map = construct_dom_tree(eval_page)
     tab.dom_tree_state = (root_node, interactive_dom_map)
     return interactive_dom_map
@@ -53,6 +160,9 @@ def _collect_visible_text(node: DOMElementNode, char_limit: int = 300) -> str:
 
     Prioritizes signal by flattening text nodes and trimming whitespace.
     """
+    def _normalize_whitespace(text: str) -> str:
+        return " ".join(text.split()).strip()
+
     pieces: List[str] = []
 
     def dfs(n: Any) -> None:
@@ -76,7 +186,6 @@ def _collect_visible_text(node: DOMElementNode, char_limit: int = 300) -> str:
     if len(text) > char_limit:
         text = text[:char_limit - 1].rstrip() + "…"
     return text
-
 
 def _select_key_attributes(attrs: Dict[str, Any], tag: str) -> Dict[str, Any]:
     """Pick high-signal attributes only."""
@@ -104,9 +213,9 @@ def _select_key_attributes(attrs: Dict[str, Any], tag: str) -> Dict[str, Any]:
         result["src"] = attrs.get("src")
     return result
 
-
-async def get_llm_browser_state(tab: zd.Tab, selector_map: InteractiveDomMap) -> Dict[str, Any]:
-    """Return a compact, high-signal browser state for LLM consumption.
+async def get_interactive_elements_state(tab: zd.Tab, selector_map: InteractiveDomMap) -> Dict[str, Any]:
+    """
+    Return a compact, high-signal browser state for LLM consumption.
 
     The selector_map is converted to a list of concise interactive element summaries
     that include key attributes and visible text content from the element subtree.
@@ -136,15 +245,19 @@ async def get_llm_browser_state(tab: zd.Tab, selector_map: InteractiveDomMap) ->
         "total_interactive": len(interactive_elements),
     }
 
-async def exec_js_interactivity(tab: zd.Tab) -> dict:
-    from pathlib import Path
-    js_path = Path(__file__).parent / "index.js"
-    with open(js_path, "r") as f:
-        js = f.read()
-    eval_page: dict = await tab.evaluate(js)
+async def _exec_js_interactivity(tab: zd.Tab) -> dict:
+    """
+    Evaluate the JavaScript code to detect interactivity.
+    """
+    js_code = _read_static_file("detect_interactivity.js")
+    eval_page: dict = await tab.evaluate(js_code)
     return eval_page    
 
 async def _wait_for_stable_network(tab: zd.Tab, idle_time: float = 1.0, timeout: float = 30.0):
+    """
+    Track network activity and wait for it to be stable.
+    """
+
     pending_requests = set()
     last_activity = time.monotonic()
 

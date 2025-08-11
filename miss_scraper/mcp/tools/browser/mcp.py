@@ -4,18 +4,23 @@ import logging
 import asyncio
 from miss_scraper.mcp.tools.browser.pool import _BrowserPool
 from miss_scraper.mcp.tools.browser.utils import (
-    exec_js_interactivity, 
     _wait_for_stable_network, 
-    get_llm_browser_state, 
+    get_interactive_elements_state, 
     get_element_by_selector_index,
     inject_interactivity,
-    get_interactive_dom_map
+    get_interactive_dom_map,
+    get_page_source_markdown,
+    get_page_metadata,
+    format_content_and_metadata,
+    inject_extracted_content
 )
 from zendriver.core.keys import KeyEvents, SpecialKeys
-from typing import Literal, Annotated
+from typing import Literal, Annotated, Dict
+from miss_scraper.mcp.tools.browser.schema import FieldDef, make_response_model
+from miss_scraper.agents.repository import make_extract_content_agent
+import os
 
-# All of these are in seconds
-PAGE_LOAD_DELAY = 10
+PAGE_LOAD_WAIT = int(os.getenv("BROWSER_PAGE_LOAD_WAIT"))
 
 logger = logging.getLogger(__name__)
 mcp = FastMCP("browser")
@@ -39,10 +44,10 @@ async def browser_navigate(
     tab = await tab.get(url)
     
     await _wait_for_stable_network(tab)
-    await asyncio.sleep(PAGE_LOAD_DELAY)
+    await asyncio.sleep(PAGE_LOAD_WAIT)
 
     interactive_dom_map = await inject_interactivity(tab)
-    return await get_llm_browser_state(tab, interactive_dom_map)
+    return await get_interactive_elements_state(tab, interactive_dom_map)
 
 @mcp.tool
 async def browser_click(
@@ -61,10 +66,10 @@ async def browser_click(
     await target_element.click()
     
     await _wait_for_stable_network(tab)
-    await asyncio.sleep(PAGE_LOAD_DELAY)
+    await asyncio.sleep(PAGE_LOAD_WAIT)
     
     interactive_dom_map = await inject_interactivity(tab)
-    return await get_llm_browser_state(tab, interactive_dom_map)
+    return await get_interactive_elements_state(tab, interactive_dom_map)
 
 @mcp.tool
 async def browser_type_keyboard(
@@ -89,37 +94,70 @@ async def browser_type_keyboard(
     await target_element.send_keys(keys)
 
     await _wait_for_stable_network(tab)
-    await asyncio.sleep(PAGE_LOAD_DELAY)
+    await asyncio.sleep(PAGE_LOAD_WAIT)
     
     interactive_dom_map = await inject_interactivity(tab)
-    return await get_llm_browser_state(tab, interactive_dom_map)
+    return await get_interactive_elements_state(tab, interactive_dom_map)
 
 @mcp.tool
 async def browser_get_page_source(
-    # include_screenshot: Annotated[bool, "Whether to include the screenshot in the response"], 
     ctx: Context
 ) -> str:
     """
-    Get the current page HTML source
+    Get the current page HTML source in markdown format
     """
     sid = ctx.session_id
     logger.info(f"sid: {sid} - Getting page source")
     tab = await browser_pool.get_tab(sid)
-    content = await tab.get_content()
-    return content
+    return await get_page_source_markdown(tab)
 
-# @mcp.tool
+@mcp.tool
 async def browser_extract_content(
-    query: Annotated[str, "The query to extract content from"], 
-    extract_links: Annotated[bool, "Whether to extract links from the content"], 
+    schema: Annotated[
+        Dict[str, FieldDef],
+        (
+            "The schema to extract content from. "
+            "This should be a dictionary where each key is the name of a field to extract, "
+            "and each value is a FieldDef object describing the expected type, whether the field is required, "
+            "and any additional constraints (such as minLength, maxLength, enum, etc). "
+            "Use this schema to guide the extraction of structured data from the page. "
+        )
+    ], 
     ctx: Context
-) -> str:
+) -> dict:
     """
-    Extract content from the page
+    Extract content from the page using intelligent analysis of markdown content, 
+    page structure, and schema-guided extraction.
     """
-    pass
+    
+    tab = await browser_pool.get_tab(ctx.session_id)
+    
+    markdown_content = await get_page_source_markdown(tab)
+    page_context = await get_page_metadata(tab)
+    complete_context = format_content_and_metadata(markdown_content, page_context)
+    
+    # Create agent with schema information
+    response_model = make_response_model(schema)
+    agent = make_extract_content_agent(response_model=response_model, schema_fields=schema)
+    
+    response = await agent.arun(complete_context)
+    response_data = response.content.data
+    
+    # Format response data
+    jsonl_dict = {i: item for i, item in enumerate(response_data)}
+    
+    await inject_extracted_content(tab, jsonl_dict)
+    return {
+        "extracted_data": jsonl_dict,
+        "metadata": {
+            "total_records": len(jsonl_dict),
+            "page_url": page_context.get("url", "unknown"),
+            "page_title": page_context.get("title", "unknown"),
+        }
+    }
+    
 
-# @mcp.tool
+@mcp.tool
 async def browser_scroll(
     direction: Annotated[Literal["up", "down"], "The direction to scroll"], 
     ctx: Context
@@ -127,9 +165,36 @@ async def browser_scroll(
     """
     Scroll the page
     """
-    pass
+    sid = ctx.session_id
+    logger.info(f"sid: {sid} - Scrolling {direction}")
+    tab = await browser_pool.get_tab(sid)
 
+    if direction == "up":
+        await tab.scroll_up(amount=75)
+    else:
+        await tab.scroll_down(amount=75)
 
+    await _wait_for_stable_network(tab)
+    await asyncio.sleep(PAGE_LOAD_WAIT)
+    
+    interactive_dom_map = await inject_interactivity(tab)
+    return await get_interactive_elements_state(tab, interactive_dom_map)
+
+@mcp.tool
+async def browser_go_back(
+    ctx: Context
+) -> str:
+    """
+    Go back to the previous page
+    """
+    tab = await browser_pool.get_tab(ctx.session_id)
+    await tab.back()
+    
+    await _wait_for_stable_network(tab)
+    await asyncio.sleep(PAGE_LOAD_WAIT)
+
+    interactive_dom_map = await inject_interactivity(tab)
+    return await get_interactive_elements_state(tab, interactive_dom_map)
 
 async def main():
     class MockCtx:

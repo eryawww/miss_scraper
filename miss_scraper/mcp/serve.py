@@ -1,5 +1,9 @@
+import dotenv
+
+dotenv.load_dotenv()
+
 from fastmcp import FastMCP
-from .tools import browser, calculator
+from .tools import browser
 import asyncio
 import contextlib
 from fastapi import Request
@@ -11,7 +15,6 @@ mcp = FastMCP("miss-scraper")
 # [INCLUDE ALL TOOLS HERE] ##############################
 # TODO: change the design to dynamically mount tools using os.listdir and importlib
 mcp.mount(browser.mcp)
-# mcp.mount(calculator.mcp)
 
 # #######################################################
 
