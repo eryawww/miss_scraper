@@ -7,6 +7,8 @@
 [![ZenBrowser](https://img.shields.io/badge/ZenBrowser-Stealth-red.svg)](https://github.com/A-d-i-t-h-y-a-n/zendriver)
 [![MCP](https://img.shields.io/badge/MCP-Compatible-orange.svg)](https://modelcontextprotocol.io)
 
+![Browser Scan Test](docs/browser-scan.png)
+
 ## ✨ Key Features
 
 Miss Scraper is a **minimal yet scalable** implementation of intelligent web scraping, designed as a lightweight alternative to browser-use while maintaining enterprise-grade capabilities. Our key features include:
