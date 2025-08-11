@@ -1,16 +1,17 @@
+import dotenv
+dotenv.load_dotenv()
+
 from fastapi import FastAPI, APIRouter, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, Any, List, Dict
-import dotenv
+from typing import Optional, Any
 import uuid
 import logging
 import json
 import re
-from miss_scraper.agents.repository import lifespan, browser_agent, extract_content_agent
+from miss_scraper.agents.repository import lifespan, browser_agent
 from agno.app.fastapi.app import FastAPIApp
 
-dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Pydantic models for API
@@ -52,96 +53,23 @@ async def chat_endpoint(request: ChatRequest):
         # Initialize results as None
         results = None
         
-        # More comprehensive tool result extraction
         # Method 1: Check agent run response messages for tool calls
         if hasattr(response, 'messages') and response.messages:
             for message in reversed(response.messages):  # Start from most recent
-                # Check for tool calls in the message
-                if hasattr(message, 'tool_calls') and message.tool_calls:
-                    for tool_call in message.tool_calls:
-                        if hasattr(tool_call, 'function') and tool_call.function.name == 'browser_extract_content':
-                            logger.info(f"Found browser_extract_content tool call: {tool_call.id}")
-                
-                # Check for tool call results
-                if hasattr(message, 'tool_call_results') and message.tool_call_results:
-                    for tool_result in message.tool_call_results:
-                        if hasattr(tool_result, 'tool_call_id'):
-                            logger.info(f"Found tool result for call: {tool_result.tool_call_id}")
-                            try:
-                                # Try to parse as JSON first
-                                if isinstance(tool_result.content, str):
-                                    result_data = json.loads(tool_result.content)
-                                else:
-                                    result_data = tool_result.content
-                                
-                                # Check if this looks like an extraction result
-                                if isinstance(result_data, dict) and 'extracted_data' in result_data:
-                                    results = result_data['extracted_data']
-                                    logger.info(f"Extracted results: {results}")
-                                    break
-                                elif isinstance(result_data, dict) and any(key in str(result_data).lower() for key in ['extract', 'data', 'content']):
-                                    results = result_data
-                                    break
-                            except (json.JSONDecodeError, AttributeError) as e:
-                                logger.warning(f"Failed to parse tool result: {e}")
-                                # Use raw content as fallback
-                                results = tool_result.content
-                
-                if results is not None:
-                    break
+                if message.role == 'tool' and any(['browser_extract_content' in dct['tool_name'] for dct in message.tool_calls]):
+                    logger.info(f"Found browser_extract_content tool call: {message.content}")
+                    tool_result = message.content
+                    if isinstance(tool_result, str):
+                        results = json.loads(tool_result)['extracted_data']
+                    if isinstance(tool_result, list):
+                        results = json.loads(tool_result[0])['extracted_data']
+                    elif isinstance(tool_result, dict):
+                        results = tool_result['extracted_data']
+                    else:
+                        raise ValueError(f"Unexpected tool result type: {type(tool_result)} : {tool_result}")
         
         # Method 2: Check agent storage for recent messages with extraction results
-        if results is None and hasattr(browser_agent, 'storage') and browser_agent.storage:
-            try:
-                # Get recent messages for this session
-                recent_messages = await browser_agent.storage.get_messages(
-                    session_id=session_id,
-                    limit=10
-                )
-                
-                for msg in reversed(recent_messages):
-                    if hasattr(msg, 'tool_call_results') and msg.tool_call_results:
-                        for tool_result in msg.tool_call_results:
-                            try:
-                                if isinstance(tool_result.content, str):
-                                    result_data = json.loads(tool_result.content)
-                                else:
-                                    result_data = tool_result.content
-                                
-                                if isinstance(result_data, dict) and 'extracted_data' in result_data:
-                                    results = result_data['extracted_data']
-                                    break
-                            except (json.JSONDecodeError, AttributeError):
-                                continue
-                    if results is not None:
-                        break
-            except Exception as e:
-                logger.warning(f"Failed to get messages from storage: {e}")
-        
-        # Method 3: Fallback - Parse response text for JSON-like extraction results
-        if results is None and text_response:
-            # Look for JSON patterns in the response
-            json_patterns = [
-                r'\{[^{}]*"extracted_data"[^{}]*\}',
-                r'\{[^{}]*"data"[^{}]*\}',
-                r'\[[\s\S]*?\]'  # Array pattern
-            ]
-            
-            for pattern in json_patterns:
-                matches = re.findall(pattern, text_response, re.DOTALL)
-                for match in matches:
-                    try:
-                        result_data = json.loads(match)
-                        if isinstance(result_data, dict) and 'extracted_data' in result_data:
-                            results = result_data['extracted_data']
-                            break
-                        elif isinstance(result_data, (list, dict)):
-                            results = result_data
-                            break
-                    except json.JSONDecodeError:
-                        continue
-                if results is not None:
-                    break
+        # TODO: Implement this
         
         logger.info(f"Final results: {results}")
         

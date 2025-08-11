@@ -37,7 +37,6 @@ browser_agent = Agent(
     tools = [_mcp_tools],
     markdown = True,
     add_history_to_messages = True,
-    num_history_responses = 2,
     agent_id = "browser-agent",
     monitoring = True,
 )
