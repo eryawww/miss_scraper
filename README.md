@@ -109,11 +109,6 @@ source install.sh
 
 ### 2. Environment Configuration
 
-```bash
-# Create environment file
-touch .env
-```
-
 **Required API Keys:**
 
 Rename `.env.example` to `.env` and add your API keys:
